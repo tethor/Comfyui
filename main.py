@@ -1,3 +1,4 @@
+import custom_memory_patch  # PATCH MEMORIA RAM - NO TOCAR
 import comfy.options
 
 comfy.options.enable_args_parsing()
