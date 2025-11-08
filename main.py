@@ -1,4 +1,3 @@
-import custom_memory_patch  # PATCH MEMORIA RAM - NO TOCAR
 import comfy.options
 
 comfy.options.enable_args_parsing()
@@ -447,7 +446,6 @@ def start_comfyui(asyncio_loop=None):
 
 import torch
 import psutil
-import gc
 
 def aggressive_memory_cleanup(log_stats=True):
     """
@@ -456,38 +454,64 @@ def aggressive_memory_cleanup(log_stats=True):
     try:
         process = psutil.Process()
         ram_before = process.memory_info().rss / 1024**3
-        
+
         # Múltiples pasadas del GC
         gc.collect(0)
         gc.collect(1)
         gc.collect(2)
-        
+
         # Descargar modelos y limpiar cachés
         comfy.model_management.unload_all_models()
         comfy.model_management.soft_empty_cache()
-        
-        # Limpiar VRAM
+
+        # DisTorch2/MultiGPU metadata cleanup
+        try:
+            # Check if MultiGPU/DisTorch2 is loaded
+            if any('multigpu' in str(mod).lower() or 'distorch' in str(mod).lower()
+                   for mod in sys.modules.keys()):
+                cleaned_count = 0
+                for lm in comfy.model_management.current_loaded_models:
+                    try:
+                        if hasattr(lm.model, 'model'):
+                            inner = lm.model.model
+                            if hasattr(inner, '_distorch_v2_meta'):
+                                delattr(inner, '_distorch_v2_meta')
+                                cleaned_count += 1
+                            if hasattr(inner, '_mgpu_unload_distorch_model'):
+                                delattr(inner, '_mgpu_unload_distorch_model')
+                        if hasattr(lm.model, '_distorch_block_assignments'):
+                            delattr(lm.model, '_distorch_block_assignments')
+                    except Exception:
+                        pass
+                if cleaned_count > 0:
+                    logging.info(f"[MEMORY CLEANUP] Cleaned DisTorch2 metadata from {cleaned_count} models")
+        except Exception as e:
+            logging.debug(f"[MEMORY CLEANUP] DisTorch2 check: {e}")
+
+        # Limpiar VRAM (multi-device support)
         if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            for device_id in range(torch.cuda.device_count()):
+                with torch.cuda.device(device_id):
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             torch.cuda.reset_peak_memory_stats()
-        
+
         # Limpiar MPS para macOS
         if hasattr(torch, "mps") and torch.backends.mps.is_available():
             torch.mps.empty_cache()
-        
+
         ram_after = process.memory_info().rss / 1024**3
         ram_freed = ram_before - ram_after
-        
+
         if log_stats and ram_freed > 0.05:
             logging.info(
                 f"[MEMORY CLEANUP] RAM liberada: {ram_freed:.2f} GB "
                 f"(Antes: {ram_before:.2f} GB → Después: {ram_after:.2f} GB)"
             )
-        
+
         return ram_freed
-        
+
     except Exception as e:
         logging.warning(f"[MEMORY CLEANUP] Error durante limpieza: {e}")
         return 0
@@ -651,21 +675,21 @@ def start_comfyui(asyncio_loop=None):
                     "status": "error",
                     "message": str(e)
                 }), 500
-        
+
         @prompt_server.routes.get("/api/memory/status")
         async def memory_status(request):
             """Endpoint para ver estado de memoria."""
             try:
                 process = psutil.Process()
                 ram_used = process.memory_info().rss / 1024**3
-                
+
                 vram_info = {}
                 if torch.cuda.is_available():
                     vram_info = {
                         "allocated_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
                         "reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
                     }
-                
+
                 return prompt_server.jsonify({
                     "ram_used_gb": round(ram_used, 2),
                     "vram": vram_info
@@ -675,11 +699,11 @@ def start_comfyui(asyncio_loop=None):
                     "status": "error",
                     "message": str(e)
                 }), 500
-        
+
         logging.info("[MEMORY OPTIMIZATION] Endpoints API añadidos:")
         logging.info("  POST /api/memory/cleanup - Liberar memoria manualmente")
         logging.info("  GET  /api/memory/status  - Ver estado de memoria")
-        
+
     except Exception as e:
         logging.warning(f"[MEMORY OPTIMIZATION] No se pudieron añadir endpoints API: {e}")
 
